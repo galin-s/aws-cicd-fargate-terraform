@@ -138,5 +138,5 @@ jobs:
       uses: benc-uk/workflow-dispatch@v1
       with:
         workflow: destroy.yml
-        ref: feat/add-all-workflows
+        ref: main
         github_token: ${{ secrets.GITHUB_TOKEN }}
