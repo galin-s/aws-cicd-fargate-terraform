@@ -1,0 +1,63 @@
+name: Terraform Bootstrap
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  actions: write
+  contents: read
+
+env:
+  AWS_REGION: eu-central-1
+  ECR_REPOSITORY: galin-demo-repo
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # --- Setup Terraform ---
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.6.0
+
+      # --- Configure AWS credentials ---
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      # --- Terraform bootstrap ---
+      - name: Terraform Bootstrap Init
+        run: |
+          cd terraform/bootstrap
+          terraform init
+
+      - name: Terraform Apply
+        run: |
+          cd terraform/bootstrap
+          terraform apply -auto-approve
+      
+      - name: Wait 1 minute
+        run: sleep 60
+      
+      # --- Save Terraform state so it could be used later for terraform destroy ---
+      - name: Save terraform state
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-state
+          path: terraform/bootstrap/terraform.tfstate
+
+      - name: Trigger deploy workflow
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: deploy.yml
+          ref: feat/add-all-workflows
+          github_token: ${{ secrets.GITHUB_TOKEN }}

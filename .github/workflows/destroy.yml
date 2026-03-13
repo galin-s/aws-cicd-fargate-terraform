@@ -1,0 +1,81 @@
+name: Terraform Destroy
+
+# on:
+#   workflow_dispatch:
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  actions: write
+  contents: read
+
+env:
+  AWS_REGION: eu-central-1
+  ECR_REPOSITORY: galin-demo-repo
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+    # --- Setup Terraform ---
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.6.0
+
+      # --- Configure AWS credentials ---
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Delete all images in ECR
+        run: |
+          aws ecr list-images \
+          --repository-name $ECR_REPOSITORY \
+          --query 'imageIds[*]' \
+          --output json > images.json
+
+          if [ -s images.json ]; then
+            aws ecr batch-delete-image \
+            --repository-name $ECR_REPOSITORY \
+            --image-ids file://images.json
+          fi
+
+
+      # --- Terraform destroy ---
+      - name: Terraform Init
+        run: |
+          cd terraform/deploy
+          terraform init
+
+      - name: Terraform Destroy
+        run: |
+          cd terraform/deploy
+          terraform destroy -auto-approve
+
+      - name: Download bootstrap state
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: bootstrap.yml
+          name: bootstrap-state
+          path: terraform/bootstrap
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bootstrap Init
+        run: |
+          cd terraform/bootstrap
+          terraform init
+    
+      - name: Bootstrap Destroy
+        run: |
+          cd terraform/bootstrap
+          terraform destroy -auto-approve

@@ -1,0 +1,147 @@
+name: Deploy to ECS
+
+# on:
+#   workflow_dispatch:
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  actions: write
+  contents: read
+
+env:
+  AWS_REGION: eu-central-1
+  ECR_REPOSITORY: galin-demo-repo
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # --- SAST (Static code scan) ---
+    - name: Run Semgrep SAST
+      uses: returntocorp/semgrep-action@v1
+
+    # --- Dependency vulnerability scan ---
+    - name: Dependency scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: fs
+        format: table
+        exit-code: 1
+        severity: CRITICAL,HIGH
+    # --- Install Tfsec ---
+    - name: Install tfsec
+      run: |
+        curl -sSL https://github.com/aquasecurity/tfsec/releases/download/v1.28.14/tfsec-linux-amd64 -o /usr/local/bin/tfsec
+        chmod +x /usr/local/bin/tfsec
+      env:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+    
+    # # --- Tfsec security scan (bootstrap) ---
+    # - name: Terraform security scan (bootstrap)
+    #   uses: aquasecurity/tfsec-action@v1.0.3
+    #   with:
+    #     working_directory: terraform/bootstrap
+
+    # --- Tfsec security scan (deploy) ---
+    - name: Terraform security scan (deploy)
+      uses: aquasecurity/tfsec-action@v1.0.3
+      with:
+        working_directory: terraform/deploy
+      env:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+
+    # # --- Checkov security scan (bootstrap) ---
+    # - name: Terraform scan with Checkov (bootstrap)
+    #   uses: bridgecrewio/checkov-action@master
+    #   with:
+    #     directory: terraform/bootstrap
+
+    # --- Checkov security scan (deploy) ---
+    - name: Terraform scan with Checkov (deploy)
+      uses: bridgecrewio/checkov-action@master
+      with:
+        directory: terraform/deploy
+      env:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+
+    # --- Setup Terraform ---
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: 1.6.0
+
+    # --- Configure AWS credentials ---
+    - name: Configure AWS
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    # --- Docker login to ECR ---
+    - name: Login to ECR
+      run: |
+        aws ecr get-login-password --region $AWS_REGION \
+        | docker login --username AWS --password-stdin \
+        ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com
+
+    # --- Build image ---
+    - name: Build Docker image
+      run: |
+        docker build -t $ECR_REPOSITORY:${{ github.sha }} .
+
+    # --- Scan Docker image ---
+    - name: Scan Docker image
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+        format: table
+        exit-code: 1
+        severity: CRITICAL
+      env:
+        ECR_REPOSITORY: galin-demo-repo
+
+    # --- Tag image ---
+    - name: Tag image
+      run: |
+        docker tag $ECR_REPOSITORY:${{ github.sha }} \
+        ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:${{ github.sha }}
+        
+        
+    # --- Terraform deploy ---
+    - name: Terraform Init    
+      run: |
+        cd terraform/deploy
+        terraform init
+
+    - name: Terraform Apply
+      run: |
+        cd terraform/deploy
+        terraform apply -auto-approve \
+        -var="container_image=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:${{ github.sha }}" \
+        -var="terraform_user=${{ secrets.AWS_TERRAFORM_USER }}"
+
+    # --- Push image ---
+    - name: Push image
+      run: |
+        docker push \
+        ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:${{ github.sha }}
+    
+    # --- Sleep for 5 minutes to check that everything works fine on AWS console ---
+    - name: Wait 5 minutes
+      run: sleep 300
+
+    - name: Trigger destroy workflow
+      uses: benc-uk/workflow-dispatch@v1
+      with:
+        workflow: destroy.yml
+        ref: feat/add-all-workflows
+        github_token: ${{ secrets.GITHUB_TOKEN }}
